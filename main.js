@@ -1,8 +1,7 @@
-// 不直接使用 Cookie 是因为 Cookie 过期时间较短。
-
 import { appendFileSync } from "fs";
 
-const host = process.env.HOST || "ikuuu.one";
+// 使用新的域名
+const host = process.env.HOST || "ikuuu.de";
 
 const logInUrl = `https://${host}/auth/login`;
 const checkInUrl = `https://${host}/user/checkin`;
@@ -27,22 +26,32 @@ function formatCookie(rawCookieArray) {
 async function logIn(account) {
   console.log(`${account.name}: 登录中...`);
 
-  const formData = new FormData();
-  formData.append("host", host);
-  formData.append("email", account.email);
-  formData.append("passwd", account.passwd);
-  formData.append("code", "");
-  formData.append("remember_me", "off");
+  const loginPayload = {
+    email: account.email,
+    passwd: account.passwd,
+    code: "",
+    remember_me: false,
+  };
 
   const response = await fetch(logInUrl, {
     method: "POST",
-    body: formData,
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+      "Referer": `https://${host}/auth/login`,
+      "Origin": `https://${host}`,
+      "Accept": "application/json",
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    body: JSON.stringify(loginPayload),
   });
 
   if (!response.ok) {
-    throw new Error(`网络请求出错 - ${response.status}`);
+    throw new Error(`网络请求出错 - ${response.status} ${response.statusText}`);
   }
 
+  let rawCookieArray = response.headers.getSetCookie();
   const responseJson = await response.json();
 
   if (responseJson.ret !== 1) {
@@ -51,9 +60,8 @@ async function logIn(account) {
     console.log(`${account.name}: ${responseJson.msg}`);
   }
 
-  let rawCookieArray = response.headers.getSetCookie();
   if (!rawCookieArray || rawCookieArray.length === 0) {
-    throw new Error(`获取 Cookie 失败`);
+    throw new Error("获取 Cookie 失败");
   }
 
   return { ...account, cookie: formatCookie(rawCookieArray) };
@@ -61,15 +69,21 @@ async function logIn(account) {
 
 // 签到
 async function checkIn(account) {
+  console.log(`${account.name}: 开始签到...`);
+
   const response = await fetch(checkInUrl, {
     method: "POST",
     headers: {
-      Cookie: account.cookie,
+      "Cookie": account.cookie,
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+      "Referer": `https://${host}/user`,
+      "X-Requested-With": "XMLHttpRequest",
     },
   });
 
   if (!response.ok) {
-    throw new Error(`网络请求出错 - ${response.status}`);
+    throw new Error(`签到请求失败 - ${response.status}`);
   }
 
   const data = await response.json();
@@ -78,20 +92,22 @@ async function checkIn(account) {
   return data.msg;
 }
 
-// 处理
+// 处理单个账户
 async function processSingleAccount(account) {
-  const cookedAccount = await logIn(account);
-
-  const checkInResult = await checkIn(cookedAccount);
-
-  return checkInResult;
+  try {
+    const loggedInAccount = await logIn(account);
+    return await checkIn(loggedInAccount);
+  } catch (error) {
+    throw new Error(`${account.name}: ${error.message}`);
+  }
 }
 
+// 写入 GitHub 输出
 function setGitHubOutput(name, value) {
   appendFileSync(process.env.GITHUB_OUTPUT, `${name}<<EOF\n${value}\nEOF\n`);
 }
 
-// 入口
+// 入口函数
 async function main() {
   let accounts;
 
@@ -110,35 +126,30 @@ async function main() {
     process.exit(1);
   }
 
-  const allPromises = accounts.map((account) => processSingleAccount(account));
+  const allPromises = accounts.map(processSingleAccount);
   const results = await Promise.allSettled(allPromises);
 
   const msgHeader = "\n======== 签到结果 ========\n\n";
   console.log(msgHeader);
 
   let hasError = false;
+  const resultLines = [];
 
-  const resultLines = results.map((result, index) => {
+  results.forEach((result, index) => {
     const accountName = accounts[index].name;
-
     const isSuccess = result.status === "fulfilled";
-
-    if (!isSuccess) {
-      hasError = true;
-    }
-
     const icon = isSuccess ? "✅" : "❌";
     const message = isSuccess ? result.value : result.reason.message;
 
     const line = `${accountName}: ${icon} ${message}`;
+    resultLines.push(line);
 
     isSuccess ? console.log(line) : console.error(line);
 
-    return line;
+    if (!isSuccess) hasError = true;
   });
 
   const resultMsg = resultLines.join("\n");
-
   setGitHubOutput("result", resultMsg);
 
   if (hasError) {
